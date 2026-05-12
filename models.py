@@ -291,6 +291,63 @@ def run_blair_horse(data: pd.DataFrame, garch_var: pd.Series) -> pd.Series:
     return forecasts
 
 
+# ── Horse 5: The Regime-Switching Blend (Your Project's Contribution) ────────
+
+def run_regime_horse(data: pd.DataFrame, garch_var: pd.Series) -> pd.Series:
+    """
+    Horse 5: Dynamic weighting based on the Variance Risk Premium (VRP).
+    
+    Logic:
+    1. Calculate VRP_t = VIX_t - GARCH_t
+    2. Split the training window into "High VRP" and "Low VRP" days.
+    3. If today's VRP is High, use the coefficients learned from past High VRP days.
+    4. If today's VRP is Low, use the coefficients from past Low VRP days.
+    """
+    forecasts = pd.Series(index=data.index, dtype=float)
+    n = len(data)
+    
+    # Calculate the Variance Premium (VIX variance minus GARCH variance)
+    vrp_series = data["vix_var"] - garch_var
+
+    for t in range(WINDOW_SIZE, n):
+        # Training slice
+        train_df = pd.DataFrame({
+            "rv":    data["realized_var"].iloc[t - WINDOW_SIZE : t],
+            "vix":   data["vix_var"].iloc[t - WINDOW_SIZE : t],
+            "garch": garch_var.iloc[t - WINDOW_SIZE : t],
+            "vrp":   vrp_series.iloc[t - WINDOW_SIZE : t]
+        }).dropna()
+
+        if len(train_df) < 100:
+            continue
+
+        # Determine the "Regime Threshold" (e.g., the median VRP in the window)
+        threshold = train_df["vrp"].median()
+        today_vrp = vrp_series.iloc[t]
+
+        # Select training data based on today's regime
+        if today_vrp > threshold:
+            # "Panic/High Info" Regime
+            sub_train = train_df[train_df["vrp"] > threshold]
+        else:
+            # "Calm/Rational" Regime
+            sub_train = train_df[train_df["vrp"] <= threshold]
+
+        # Fit OLS on the specific regime only
+        y = sub_train["rv"]
+        X = sm.add_constant(sub_train[["vix", "garch"]])
+        model = sm.OLS(y, X).fit()
+
+        # Predict today
+        today_X = [1, data["vix_var"].iloc[t], garch_var.iloc[t]]
+        forecasts.iloc[t] = model.predict(today_X)[0]
+
+        if (t - WINDOW_SIZE) % 500 == 0:
+            print(f"  Regime horse: {t}/{n} days processed...")
+
+    print("  Regime horse: done.")
+    return forecasts
+
 # ── Shared Evaluation Helper ──────────────────────────────────────────────────
 
 def evaluate(realized: pd.Series, forecast: pd.Series, label: str):
@@ -330,6 +387,9 @@ if __name__ == "__main__":
     print(f"\nRunning Blair horse...")
     blair_forecasts = run_blair_horse(data, garch_var)
 
+    print(f"\nRunning Regime horse (Horse 5)...")
+    regime_forecasts = run_regime_horse(data, garch_var)
+
     # Align everything on dates where all series are available
     results = pd.DataFrame({
         "realized_var":    data["realized_var"],
@@ -337,7 +397,10 @@ if __name__ == "__main__":
         "garch_forecast":  garch_forecasts,
         "intra_forecast":  intra_forecasts,
         "blair_forecast":  blair_forecasts,
+        "regime_forecast": regime_forecasts,
     }).dropna()
+
+    results.to_csv("data/forecast_results.csv")
 
     total_possible = len(data) - WINDOW_SIZE
     print(f"\nEvaluation window: {len(results)} days "
@@ -348,3 +411,4 @@ if __name__ == "__main__":
     evaluate(results["realized_var"], results["garch_forecast"], "Horse 2: GARCH")
     evaluate(results["realized_var"], results["intra_forecast"], "Horse 3: INTRA")
     evaluate(results["realized_var"], results["blair_forecast"], "Horse 4: Blair (constant blend)")
+    evaluate(results["realized_var"], results["regime_forecast"], "Horse 5: Regime-Switching Blend")
